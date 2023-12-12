@@ -153,20 +153,21 @@ if __name__ == "__main__":
             )
 
         txt2img.enable_vae_slicing()
-        
+        generator = torch.Generator("cuda").manual_seed(42)
+
         distributed_state = PartialState()
         txt2img.to(distributed_state.device)
 
         with torch.no_grad():
             all_prompts = all_prompts * opt.n_samples
-            BATCH_SIZE = 64
+            BATCH_SIZE = 96
             batches = list(divide_chunks(all_prompts, BATCH_SIZE))
             print("Prompts:", len(all_prompts))
             counter = 0    
             for index, batch_prompts in enumerate(batches):
                 print(index, "/", len(batches))
                 with distributed_state.split_between_processes(batch_prompts) as prompts:
-                    generated_images = txt2img(prompts, num_inference_steps=100)["images"]
+                    generated_images = txt2img(prompts, generator = generator, num_inference_steps=100)["images"]
                     for i in range(len(prompts)):
                         dst_path = os.path.join(opt.output_path, prompts[i], "fake" + str(counter) +".png")
                         counter += 1
