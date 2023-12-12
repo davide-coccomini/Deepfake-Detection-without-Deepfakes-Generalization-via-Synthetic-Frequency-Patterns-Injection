@@ -36,7 +36,7 @@ if __name__ == "__main__":
     
     parser.add_argument('--workers', default=8, type=int,
                         help='Number of data loader workers.')
-    parser.add_argument('--n_samples', default=4, type=int,
+    parser.add_argument('--n_samples', default=1, type=int,
                         help='Number of generated images.')
     parser.add_argument('--considered_images', default=-1, type=int,
                         help='Number of considered images.')
@@ -48,6 +48,8 @@ if __name__ == "__main__":
                         help='List of images.')
     parser.add_argument('--copy_files', default=False, action="store_true",
                         help='Do files copy')
+    parser.add_argument('--regenerate', default=False, action="store_true",
+                        help='Regenerated already generated images.')
     parser.add_argument('--gpu_id', default=-1, type=int,
                         help='ID of GPU to be used.')
     parser.add_argument('--data_path', default="../../data/coco/train/train2017", type=str,
@@ -92,21 +94,41 @@ if __name__ == "__main__":
         for id in captioned_images:
             captioned_images[id][1] = random.choice(captioned_images[id][1])
 
+        # Filter only captions for which a generation has not been done
+        if not opt.regenerate:
+            rows_to_remove = []
+            for id, (image_path, caption) in captioned_images.items():
+                dst_path = os.path.join(opt.output_path, caption)
+                if os.path.exists(dst_path) and len(os.listdir(dst_path)) > 1:
+                    rows_to_remove.append(id)
+            
+            for id in rows_to_remove:
+                del captioned_images[id]
+
+            print("Ignored", len(rows_to_remove), "captions already generated.")
+
+                
    
         captioned_images = list(captioned_images.items())
         captioned_images = sorted(captioned_images, key=lambda k: random.random())
         if opt.considered_images != -1:
             captioned_images = captioned_images[:opt.considered_images]
-            
+        
         all_prompts = [row[1][1] for row in captioned_images]
         
         if opt.copy_files:
-            for row in captioned_images:
+            print("Copying real images...")
+            for index, row in enumerate(captioned_images):
+                if index % 10000 == 0:
+                    print("Copied", index, "/", len(captioned_images))
                 src_image = row[1][0]
                 dst_path = os.path.join(opt.output_path, row[1][1])
                 os.makedirs(dst_path, exist_ok = True)
-                dst_image = os.path.join(dst_path, "real.png")        
+                dst_image = os.path.join(dst_path, "real.png")    
+                if os.path.exists(dst_image):
+                    continue    
                 shutil.copy(src_image, dst_image)
+
 
         if opt.generator == 0:
             txt2img = StableDiffusionXLPipeline.from_pretrained(
