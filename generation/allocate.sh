@@ -1,0 +1,1 @@
+salloc --nodes 1 --ntasks-per-node 1 --cpus-per-task 8  --gres gpu:4 --partition boost_usr_prod --account IscrC_DIFD --time 24:00:00 
