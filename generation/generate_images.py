@@ -42,7 +42,7 @@ if __name__ == "__main__":
                         help='Number of considered images.')
     parser.add_argument('--dataset', default=0, type=int,
                         help='Dataset (0: COCO;).')
-    parser.add_argument('--generator', default=2, type=int,
+    parser.add_argument('--generator', default=0, type=int,
                         help='Generator (0: Stable Diffusion XL; 1: Stable Diffusion V2.1; 2: Stable Diffusion V2).')
     parser.add_argument('--list_file', default="../../data/coco/annotations/captions_train2017.json", type=str,
                         help='List of images.')
@@ -79,8 +79,6 @@ if __name__ == "__main__":
         c = 0
         for element in data["annotations"]:
             c += 1
-            if c > 100:
-                break
             element = dict(element)
             id = element["image_id"]
             if id in images:
@@ -137,13 +135,11 @@ if __name__ == "__main__":
         distributed_state = PartialState()
         txt2img.to(distributed_state.device)
 
-        print(torch.__version__)
-        print(f"CUDA Version: {torch.version.cuda if torch.cuda.is_available() else 'Not available'}")
-
         with torch.no_grad():
             all_prompts = all_prompts * opt.n_samples
             BATCH_SIZE = 64
             batches = list(divide_chunks(all_prompts, BATCH_SIZE))
+            print("Prompts:", len(all_prompts))
             counter = 0    
             for index, batch_prompts in enumerate(batches):
                 print(index, "/", len(batches))
@@ -153,10 +149,3 @@ if __name__ == "__main__":
                         dst_path = os.path.join(opt.output_path, prompts[i], "fake" + str(counter) +".png")
                         counter += 1
                         generated_images[i].save(dst_path)
-
-
-
-
-
-        
-
