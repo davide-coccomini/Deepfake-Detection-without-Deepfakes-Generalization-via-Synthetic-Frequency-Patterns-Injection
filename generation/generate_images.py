@@ -97,16 +97,18 @@ if __name__ == "__main__":
         # Filter only captions for which a generation has not been done
         if not opt.regenerate:
             rows_to_remove = []
+            captions_to_remove = []
             for id, (image_path, caption) in captioned_images.items():
                 dst_path = os.path.join(opt.output_path, caption)
                 if os.path.exists(dst_path) and len(os.listdir(dst_path)) > 1:
                     rows_to_remove.append(id)
+                    captions_to_remove.append(caption)
             
             for id in rows_to_remove:
                 del captioned_images[id]
 
             print("Ignored", len(rows_to_remove), "captions already generated.")
-
+            print(captions_to_remove)
                 
    
         captioned_images = list(captioned_images.items())
@@ -166,9 +168,11 @@ if __name__ == "__main__":
             counter = 0    
             for index, batch_prompts in enumerate(batches):
                 print(index, "/", len(batches))
+                print("Prompts:", batch_prompts)
                 with distributed_state.split_between_processes(batch_prompts) as prompts:
-                    generated_images = txt2img(prompts, generator = generator, num_inference_steps=100)["images"]
+                    generated_images = txt2img(prompts, generator = generator, num_inference_steps = 100)["images"]
                     for i in range(len(prompts)):
-                        dst_path = os.path.join(opt.output_path, prompts[i], "fake" + str(counter) +".png")
+                        dst_path = os.path.join(opt.output_path, prompts[i], "fake" + str(counter) + "_" + str(distributed_state.process_index) + ".png")
                         counter += 1
                         generated_images[i].save(dst_path)
+                print()
