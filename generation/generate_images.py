@@ -44,7 +44,7 @@ if __name__ == "__main__":
                         help='Dataset (0: COCO;).')
     parser.add_argument('--generator', default=0, type=int,
                         help='Generator (0: Stable Diffusion XL; 1: Stable Diffusion V2.1; 2: Stable Diffusion V2).')
-    parser.add_argument('--list_file', default="../../data/coco/annotations/captions_train2017.json", type=str,
+    parser.add_argument('--list_file', default="../../data/coco/annotations/captions_test2017.json", type=str,
                         help='List of images.')
     parser.add_argument('--copy_files', default=False, action="store_true",
                         help='Do files copy')
@@ -52,14 +52,16 @@ if __name__ == "__main__":
                         help='Regenerated already generated images.')
     parser.add_argument('--gpu_id', default=-1, type=int,
                         help='ID of GPU to be used.')
-    parser.add_argument('--data_path', default="../../data/coco/train/train2017", type=str,
+    parser.add_argument('--data_path', default="../../data/coco/test/test2017", type=str,
                         help='Path to data.')
-    parser.add_argument('--excluded_images', default=["../../data/diffused_coco/train", "../../data/diffused_coco/train"], type=list,
+    parser.add_argument('--excluded_images', default=[""], type=list,
                         help='Path to excluded images.')
-    parser.add_argument('--output_path', default="../../data/sd_diffused_coco/train", type=str,
+    parser.add_argument('--output_path', default="../../data/sd_diffused_coco/test", type=str,
                         help='Output path.')
     opt = parser.parse_args()
     random.seed(42)
+
+
 
 
     if opt.gpu_id == -1:
@@ -131,6 +133,9 @@ if __name__ == "__main__":
                     continue    
                 shutil.copy(src_image, dst_image)
 
+        nnodes = int(os.environ.get("SLURM_NNODES"))
+        node_id = os.environ.get("SLURM_NODEID")
+        all_prompts = list(divide_chunks(all_prompts, int(len(all_prompts)/nnodes)))[int(node_id)]
 
         if opt.generator == 0:
             txt2img = StableDiffusionXLPipeline.from_pretrained(
@@ -170,9 +175,10 @@ if __name__ == "__main__":
                 print(index, "/", len(batches))
                 print("Prompts:", batch_prompts)
                 with distributed_state.split_between_processes(batch_prompts) as prompts:
-                    generated_images = txt2img(prompts, generator = generator, num_inference_steps = 100)["images"]
+                    generated_images = txt2img(prompts, generator = generator, num_inference_steps = 200)["images"]
                     for i in range(len(prompts)):
                         dst_path = os.path.join(opt.output_path, prompts[i], "fake" + str(counter) + "_" + str(distributed_state.process_index) + ".png")
                         counter += 1
+                        #print(dst_path)
                         generated_images[i].save(dst_path)
                 print()
