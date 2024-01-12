@@ -290,17 +290,13 @@ class FrequencyPatterns(DualTransform):
 
 
     def pattern_from_file(self, cols, rows, directory_path='outputs/fouriers/output_glide'):
-        # Ottieni la lista di file .npy nella directory
         files = [f for f in os.listdir(directory_path) if f.endswith('.npy') and f.startswith("fft_sample")] 
 
-        # Assicurati che ci siano file disponibili
         if not files:
             raise ValueError("No pattern file found.")
 
-        # Scegli casualmente uno dei file
         selected_file = np.random.choice(files)
 
-        # Carica il pattern da file
         pattern = np.load(os.path.join(directory_path, selected_file))
 
         return pattern
