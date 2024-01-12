@@ -3,15 +3,13 @@ import random
 import cv2
 import numpy as np
 import torch
-from albumentations import DualTransform, ImageOnlyTransform
+from albumentations import DualTransform, ImageOnlyTransform, RandomCrop
 from albumentations.augmentations.functional import crop
 
-from torchsr.models import edsr_baseline
 
 from skimage.color import rgb2hsv, rgb2gray, rgb2yuv
 from skimage import color, exposure, transform
 from skimage.exposure import equalize_hist
-from albumentations import RandomCrop
 from scipy.fftpack import dct, idct
 
 def isotropically_resize_image(img, size, interpolation_down=cv2.INTER_AREA, interpolation_up=cv2.INTER_CUBIC):
@@ -192,6 +190,7 @@ class FrequencyPatterns(DualTransform):
                         self.pattern_concentric_circles, self.pattern_checkerboard,
                         self.pattern_high_frequency_noise, self.pattern_structured_noise, self.pattern_gradient_patterns]
     
+    '''
     def generate_pattern(self, pattern_function, cols, rows):
         pattern = pattern_function(cols//2, rows//2)
 
@@ -199,20 +198,25 @@ class FrequencyPatterns(DualTransform):
                              np.hstack([np.flipud(pattern), np.flipud(np.fliplr(pattern))])])
 
         return pattern
-        
-    def apply(self, img, required_pattern=None, return_pattern=False, copy=True, weight=0.05, mode=0, **params):
+    '''
+
+    def apply(self, img, required_pattern=None, return_pattern=False, make_pattern_fft=True, copy=True, weight=0.05, mode=0, **params):
         result_channels = []
         
         if required_pattern is None:
             pattern_function = random.choice(self.patterns)
         else:
             pattern_function = required_pattern
-        f_pattern = self.generate_pattern(pattern_function, cols=img.shape[1], rows=img.shape[0])
+        
+        pattern = pattern_function(cols=img.shape[1], rows=img.shape[0])
 
         if return_pattern:
-            return f_pattern
+            return pattern
         
-        f_pattern = np.fft.fft2(f_pattern, s=(img.shape[0], img.shape[1]))
+        if make_pattern_fft:
+            f_pattern = np.fft.fft2(f_pattern, s=(img.shape[0], img.shape[1]))
+        else: # The pattern comes from a file and it is already the FFT
+            f_pattern = pattern
 
         for channel in range(img.shape[2]):
             if mode == 0:
@@ -284,6 +288,22 @@ class FrequencyPatterns(DualTransform):
 
         return result
 
+
+    def pattern_from_file(self, cols, rows, directory_path='outputs/fouriers/output_glide'):
+        # Ottieni la lista di file .npy nella directory
+        files = [f for f in os.listdir(directory_path) if f.endswith('.npy') and f.startswith("fft_sample")] 
+
+        # Assicurati che ci siano file disponibili
+        if not files:
+            raise ValueError("No pattern file found.")
+
+        # Scegli casualmente uno dei file
+        selected_file = np.random.choice(files)
+
+        # Carica il pattern da file
+        pattern = np.load(os.path.join(directory_path, selected_file))
+
+        return pattern
 
     def pattern_grid(self, cols, rows):
         grid_spacing = np.random.randint(5, 50)
