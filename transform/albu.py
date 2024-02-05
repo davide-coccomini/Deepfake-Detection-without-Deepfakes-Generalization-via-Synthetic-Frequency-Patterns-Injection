@@ -5,7 +5,8 @@ import numpy as np
 import torch
 from albumentations import DualTransform, ImageOnlyTransform, RandomCrop
 from albumentations.augmentations.functional import crop
-
+import os
+import matplotlib.pyplot as plt
 
 from skimage.color import rgb2hsv, rgb2gray, rgb2yuv
 from skimage import color, exposure, transform
@@ -180,16 +181,27 @@ class DCT(DualTransform):
 
 
 class FrequencyPatterns(DualTransform):
-    def __init__(self, p=0.5) -> None:
+    def __init__(self, p=0.5, required_pattern=0) -> None:
         super(FrequencyPatterns, self).__init__(p=p)
         self.prob = p
-        self.patterns = [self.pattern_grid, self.pattern_spiral, self.pattern_aura, self.pattern_mode_collapse,
-                        self.pattern_circular_checkerboard, self.pattern_zigzag, self.pattern_moire, self.pattern_radial_gradient,
-                        self.pattern_stripes, self.pattern_checkerboard, self.pattern_random_dots,
-                        self.pattern_random_circles, self.pattern_random_diagonal_lines, self.pattern_random_ellipses,
-                        self.pattern_concentric_circles, self.pattern_checkerboard,
-                        self.pattern_high_frequency_noise, self.pattern_structured_noise, self.pattern_gradient_patterns]
-    
+        self.geometric_patterns = [self.pattern_grid, self.pattern_symmetric_grid, self.pattern_checkerdboard, self.pattern_circular_checkerboard, self.pattern_circles, self.pattern_ovals, self.pattern_squares, self.pattern_random_lines, self.pattern_stripes]
+        self.peaks_patterns = [self.pattern_random_auras, self.pattern_ring_aura, self.pattern_centered_aura, self.pattern_variable_intensity, self.pattern_circular_peaks, self.pattern_random_points]
+        self.fourier_patterns = [self.pattern_symmetric_blobs_fourier, self.pattern_symmetric_points_fourier]
+        self.patterns = []
+
+        if required_pattern == 0: # All Patterns
+            self.patterns.extend(self.geometric_patterns)
+            self.patterns.extend(self.peaks_patterns)
+            self.patterns.extend(self.fourier_patterns)
+        if required_pattern == 1: # Geometric Patterns
+            self.patterns = self.geometric_patterns 
+        if required_pattern == 2: # Peaks Patterns
+            self.patterns = self.peaks_patterns
+        if required_pattern == 3:
+            self.patterns = self.fourier_patterns
+        if required_pattern == 4: # Glide pattern
+            self.patterns = [self.pattern_glide]    
+            self.files = []    
     '''
     def generate_pattern(self, pattern_function, cols, rows):
         pattern = pattern_function(cols//2, rows//2)
@@ -197,40 +209,45 @@ class FrequencyPatterns(DualTransform):
         pattern = np.vstack([np.hstack([pattern, np.fliplr(pattern)]),
                              np.hstack([np.flipud(pattern), np.flipud(np.fliplr(pattern))])])
 
-        return pattern
+        return pattern, True
     '''
 
-    def apply(self, img, required_pattern=None, return_pattern=False, make_pattern_fft=True, copy=True, weight=0.05, mode=0, **params):
+    def apply(self, img, required_pattern_fn=None, return_pattern=False,  copy=True, weight=0.8, mode=0, **params):
         result_channels = []
         
-        if required_pattern is None:
+        if required_pattern_fn is None:
             pattern_function = random.choice(self.patterns)
         else:
-            pattern_function = required_pattern
+            pattern_function = required_pattern_fn
         
-        pattern = pattern_function(cols=img.shape[1], rows=img.shape[0])
+        res = pattern_function(cols=img.shape[1], rows=img.shape[0])
+        pattern = res[0]
+        make_pattern_fft = res[1]
 
         if return_pattern:
-            return pattern
+            return pattern, make_pattern_fft
         
         if make_pattern_fft:
-            f_pattern = np.fft.fft2(f_pattern, s=(img.shape[0], img.shape[1]))
+            f_pattern = np.fft.fft2(pattern, s=(img.shape[0], img.shape[1]))
         else: # The pattern comes from a file and it is already the FFT
             f_pattern = pattern
 
+        f_transform_channels = []
+        
         for channel in range(img.shape[2]):
             if mode == 0:
                 # Do the Fourier Transform of the channel of the image
                 f_transform_channel = np.fft.fft2(img[..., channel])
+                f_transform_channels.append(f_transform_channel)
 
                 # Move to magnitude/phase representation
                 magnitude_original = np.abs(f_transform_channel)
                 phase_original = np.angle(f_transform_channel)
-
+                
                 magnitude_pattern = np.abs(f_pattern)
-
                 # Make the weighted sum of the two magnitudes
-                magnitude_result = (1 - weight) * magnitude_original + weight * magnitude_pattern
+                #magnitude_result = (1 - weight) * magnitude_original + weight * magnitude_pattern
+                magnitude_result =  magnitude_original + magnitude_pattern
 
                 # Combine again the obtained magnitude with the phase of the original image
                 f_result_channel = magnitude_result * np.exp(1j * phase_original)
@@ -240,6 +257,7 @@ class FrequencyPatterns(DualTransform):
 
                 # Append the resulting channel
                 result_channels.append(result_channel)
+                
             elif mode == 1:
                 # Move to magnitude/phase representation
                 magnitude_pattern = np.abs(f_pattern)
@@ -255,6 +273,7 @@ class FrequencyPatterns(DualTransform):
             elif mode == 2:
                 # Do the Fourier Transform of the channel of the image
                 f_transform_channel = np.fft.fft2(img[..., channel])
+                f_transform_channels.append(f_transform_channel)
 
                 # Move to magnitude/phase representation
                 magnitude_original = np.abs(f_transform_channel)
@@ -264,7 +283,7 @@ class FrequencyPatterns(DualTransform):
                 phase_pattern = np.angle(f_pattern)
 
                 # Make the weighted sum of the two magnitudes
-                magnitude_result = (1 - weight) * magnitude_original + weight * magnitude_pattern
+                magnitude_result =  magnitude_original + magnitude_pattern
 
                 # Make the weighted sum of the two phases
                 phase_result = (1 - weight) * phase_original + weight * phase_pattern
@@ -277,87 +296,98 @@ class FrequencyPatterns(DualTransform):
 
                 # Append the resulting channel
                 result_channels.append(result_channel)
+            elif mode == 3:
+                 # Do the Fourier Transform of the channel of the image
+                f_transform_channel = np.fft.fft2(img[..., channel])
+                f_transform_channels.append(f_transform_channel)
 
+                # Move to magnitude/phase representation
+                magnitude_original = np.abs(f_transform_channel)
+                phase_original = np.angle(f_transform_channel)
+                
+                magnitude_pattern = np.abs(f_pattern)
+                # Make the weighted sum of the two magnitudes
+                #magnitude_result = (1 - weight) * magnitude_original + weight * magnitude_pattern
+                magnitude_result =  np.maximum(magnitude_original, magnitude_pattern)
+
+                # Combine again the obtained magnitude with the phase of the original image
+                f_result_channel = magnitude_result * np.exp(1j * phase_original)
+
+                # Make the inverse fourier transform
+                result_channel = np.fft.ifft2(f_result_channel).real
+
+                # Append the resulting channel
+                result_channels.append(result_channel)
 
 
         # Stack together the channels
         result = np.stack(result_channels, axis=-1)
+        '''
+        fig = plt.figure(figsize=(8, 8))
+        plt.imshow(f_pattern.clip(0, 1),
+                   clim=[0, 1], extent=[-0.5, 0.5, 0.5, -0.5])
+        plt.xticks([])
+        plt.yticks([])
+        
+        fig.savefig("pattern_fft.png",
+                    bbox_inches='tight', pad_inches=0.0)
 
-        # Go back to the 0-255 range
+        fig = plt.figure(figsize=(8, 8))
+        plt.imshow(np.mean(f_transform_channels, -1).clip(0, 1),
+                   clim=[0, 1], extent=[-0.5, 0.5, 0.5, -0.5])
+        plt.xticks([])
+        plt.yticks([])
+        
+        fig.savefig("image_fft.png",
+                    bbox_inches='tight', pad_inches=0.0)
+
         result = cv2.normalize(result, None, 0, 255, cv2.NORM_MINMAX)
+        cv2.imwrite("pattern_applied_image.png", result)
+        '''
 
+        
+        result = cv2.normalize(result, None, 0, 255, cv2.NORM_MINMAX)
         return result
 
+    def pattern_glide(self, cols, rows, directory_path='outputs/fouriers/output_glide'):
+        pattern = self.pattern_from_file(cols, rows, directory_path)
+        
+        resized_pattern = cv2.resize(pattern, (cols, rows))
 
-    def pattern_from_file(self, cols, rows, directory_path='outputs/fouriers/output_glide'):
-        files = [f for f in os.listdir(directory_path) if f.endswith('.npy') and f.startswith("fft_sample")] 
+        return resized_pattern, False
 
-        if not files:
+
+    def pattern_from_file(self, cols, rows, directory_path):
+        if len(self.files) == 0:
+            self.files = [np.load(os.path.join(directory_path, f)) for f in os.listdir(directory_path) if f.endswith('.npy') and f.startswith("fft_sample")]
+        
+        if not self.files:
             raise ValueError("No pattern file found.")
+        pattern_index = np.random.choice(len(self.files)) 
+        pattern = self.files[pattern_index]
+        '''
+        fig = plt.figure(figsize=(8, 8))
+        plt.imshow(np.mean(pattern, -1).clip(0, 1),
+                   clim=[0, 1], extent=[-0.5, 0.5, 0.5, -0.5])
+        plt.xticks([])
+        plt.yticks([])
+        
+        fig.savefig("pattern_fft_readed.png",
+                    bbox_inches='tight', pad_inches=0.0)
+        '''
+        return np.mean(pattern, -1)
 
-        selected_file = np.random.choice(files)
 
-        pattern = np.load(os.path.join(directory_path, selected_file))
 
-        return pattern
-
-    def pattern_grid(self, cols, rows):
-        grid_spacing = np.random.randint(5, 50)
-        grid_amplitude = np.random.randint(10, 100)
-
-        frequency_pattern = np.zeros((rows, cols))
-        for x in range(0, cols, grid_spacing):
-            frequency_pattern[:, x] = grid_amplitude
-        for y in range(0, rows, grid_spacing):
-            frequency_pattern[y, :] = grid_amplitude
-
-        return frequency_pattern
-
-    def pattern_spiral(self, cols, rows):
-        num_turns = np.random.randint(2, 5)
-
+    def pattern_circular_checkerboard(self, cols, rows):
         pattern = np.zeros((rows, cols))
-        center_x = cols // 2
-        center_y = rows // 2
-        for angle in range(15, 360 * num_turns, 5):
-            radius = angle / 5
-            x = int(center_x + radius * np.cos(np.radians(angle)))
-            y = int(center_y + radius * np.sin(np.radians(angle)))
-            if 0 <= x < cols and 0 <= y < rows:
-                pattern[y, x] = 255  
-
-        return pattern
-
-    def pattern_aura(self, cols, rows):
-        aura_intensity = np.random.uniform(0.1, 0.5)
-        aura_frequency = np.random.randint(5, 20)
-        x = np.arange(cols)
-        y = np.arange(rows)
-        X, Y = np.meshgrid(x, y)
-
-        pattern_real = np.sin(2 * np.pi * aura_frequency * (X + Y) / (cols + rows))
-        pattern_imag = np.zeros_like(pattern_real)
-
-        pattern = aura_intensity * (pattern_real + 1j * pattern_imag)
-
-        return pattern
-
-    def pattern_mode_collapse(self, cols, rows):
-        num_repeated_patterns = np.random.randint(3, 10)
-        intensity = np.random.uniform(0.1, 0.5)
-
-        pattern = np.zeros((rows, cols))
-        block_width = cols // num_repeated_patterns
-        for i in range(num_repeated_patterns):
-            pattern[:, i * block_width:(i + 1) * block_width] = intensity  
-
-        return pattern
-
-    def pattern_circular_checkerboard(self, cols, rows, num_sectors=8):
-        pattern = np.zeros((rows, cols))
+        num_sectors = random.randint(4, 16)
 
         center_x, center_y = cols // 2, rows // 2
         max_radius = min(center_x, center_y)
+        if max_radius == 0:
+            max_radius == 1
+
         sector_angle = 2 * np.pi / num_sectors
 
         for y in range(rows):
@@ -373,191 +403,342 @@ class FrequencyPatterns(DualTransform):
                 if sector_index % 2 == 0:
                     pattern[y, x] = 255  
 
-        return pattern
+        return pattern, True
 
-    def pattern_zigzag(self, cols, rows):
-        zigzag_amplitude = np.random.randint(10, 40)
-        zigzag_frequency = np.random.randint(5, 20)
-
+    def pattern_grid(self, cols, rows):
         pattern = np.zeros((rows, cols))
-        for y in range(rows):
-            x = int(zigzag_amplitude * np.sin(2 * np.pi * zigzag_frequency * y / rows))
-            pattern[y, x:] = 255  
 
-        return pattern
+        cell_size = random.randint(10, 30)
+        intensity_range = (50, 200)
 
-    def pattern_moire(self, cols, rows):
-        num_lines = np.random.randint(5, 20)
-        line_spacing = min(rows // num_lines, cols)
-        intensity = np.random.uniform(0.1, 0.5)
+        for y in range(0, rows, cell_size):
+            for x in range(0, cols, cell_size):
+                cell_intensity = random.randint(*intensity_range)
+                pattern[y:y+cell_size, x:x+cell_size] = cell_intensity
 
+        return pattern, True
+
+
+    def pattern_checkerdboard(self, cols, rows):
         pattern = np.zeros((rows, cols))
-        for i in range(num_lines):
-            y = i * line_spacing
-            if y < rows:
-                pattern[y, :] = intensity  
 
-        return pattern
+        cell_size = random.randint(10, 30)
+        num_cells = random.randint(5, 20)
+        intensity = random.randint(150, 255)
 
-    def pattern_radial_gradient(self, cols, rows):
+
+        center_x, center_y = cols // 2, rows // 2
+        max_offset = min(center_x, center_y) - cell_size
+        for y in range(center_y - max_offset, center_y + max_offset, cell_size*2):
+            for x in range(center_x - max_offset, center_x + max_offset, cell_size*2):
+                pattern[y:y + cell_size, x:x + cell_size] = intensity
+
+
+        return pattern, True
+
+    def pattern_squares(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+
+        num_cells = random.randint(5, 20)
+        cell_size = random.randint(10, 30)
+        intensity = random.randint(150, 255)
+
+        center_or_edge = random.choice(['center', 'edge'])
+
+        for _ in range(num_cells):
+            if center_or_edge == 'center':
+                cell_x, cell_y = self.random_position_in_center(cols, rows, cell_size)
+            else:
+                cell_x, cell_y = self.random_position_in_edge(cols, rows, cell_size)
+
+            pattern[cell_y:cell_y + cell_size, cell_x:cell_x + cell_size] = intensity
+
+        return pattern, True
+
+    def random_position_in_center(self, cols, rows, cell_size):
+        center_x, center_y = cols // 2, rows // 2
+        max_offset = min(center_x, center_y) - cell_size
+
+        cell_x = random.randint(center_x - max_offset, center_x + max_offset - cell_size)
+        cell_y = random.randint(center_y - max_offset, center_y + max_offset - cell_size)
+
+        return cell_x, cell_y
+
+    def random_position_in_edge(self, cols, rows, cell_size):
+        edge_x = random.choice([0, cols - 1])
+        edge_y = random.choice([0, rows - 1])
+
+        cell_x = random.randint(edge_x, cols - cell_size) if edge_x == 0 else random.randint(0, cols - cell_size)
+        cell_y = random.randint(edge_y, rows - cell_size) if edge_y == 0 else random.randint(0, rows - cell_size)
+
+        return cell_x, cell_y
+
+    def pattern_random_lines(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+
+        num_lines = random.randint(5, 20)
+
+        for _ in range(num_lines):
+            line_intensity = random.randint(50, 200)
+            line_length = random.randint(10, min(cols, rows) // 2)
+            line_angle = random.uniform(0, 2 * np.pi)
+            start_x = cols // 2
+            start_y = rows // 2
+
+            for i in range(line_length):
+                x = int(start_x + i * np.cos(line_angle))
+                y = int(start_y + i * np.sin(line_angle))
+
+                if 0 <= x < cols and 0 <= y < rows:
+                    pattern[y, x] = line_intensity
+
+        return pattern, True
+
+    def pattern_random_points(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+
+        num_points = random.randint(2, 30)
+
+        for _ in range(num_points):
+            point_intensity = random.randint(10, 255)
+            point_x = random.randint(0, cols - 1)
+            point_y = random.randint(0, rows - 1)
+            pattern[point_y, point_x] = point_intensity
+
+        return pattern, True
+
+    def pattern_circular_peaks(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+        num_peaks = random.randint(2, 30)
+
+        for _ in range(num_peaks):
+            peak_intensity = random.randint(100, 255)
+            peak_x = random.randint(0, cols - 1)
+            peak_y = random.randint(0, rows - 1)
+
+            inner_radius = random.randint(5, 10)
+            outer_radius = random.randint(15, 30)
+            angle = random.uniform(0, 2 * np.pi)
+
+            for i in range(-outer_radius, outer_radius + 1):
+                for j in range(-outer_radius, outer_radius + 1):
+                    distance = np.sqrt(i**2 + j**2)
+                    if inner_radius <= distance <= outer_radius:
+                        x = peak_x + i
+                        y = peak_y + j
+
+                        x = np.clip(x, 0, cols - 1)
+                        y = np.clip(y, 0, rows - 1)
+
+                        pattern[y, x] = peak_intensity * np.exp(-0.5 * ((distance - inner_radius) / (outer_radius - inner_radius))**2)
+        return pattern, True
+
+    
+    def pattern_symmetric_points_fourier(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+
+        num_peaks = random.randint(5, 20)
+
+        for _ in range(num_peaks):
+            peak_intensity = random.uniform(100, 200) 
+            peak_x = random.randint(0, cols // 2 - 1)
+            peak_y = random.randint(0, rows // 2 - 1)
+
+            pattern[peak_y, peak_x] = peak_intensity
+            pattern[rows - 1 - peak_y, cols - 1 - peak_x] = peak_intensity
+            pattern[peak_y, cols - 1 - peak_x] = peak_intensity
+            pattern[rows - 1 - peak_y, peak_x] = peak_intensity
+
+        return np.fft.ifft2(pattern**2).real, True
+
+
+    def pattern_symmetric_blobs_fourier(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+        num_blobs = random.randint(2, 12)
+
+        for _ in range(num_blobs):
+            blob_intensity = random.uniform(100, 255) 
+            blob_size = random.randint(5, 30)
+            blob_x = random.randint(0, cols // 2 - blob_size)
+            blob_y = random.randint(0, rows // 2 - blob_size)
+
+            pattern[blob_y:blob_y + blob_size, blob_x:blob_x + blob_size] = self.create_gaussian_blob(blob_size, blob_intensity)
+            pattern[rows - 1 - blob_y - blob_size:rows - 1 - blob_y, cols - 1 - blob_x - blob_size:cols - 1 - blob_x] = self.create_gaussian_blob(blob_size, blob_intensity)
+            pattern[blob_y:blob_y + blob_size, cols - 1 - blob_x - blob_size:cols - 1 - blob_x] = self.create_gaussian_blob(blob_size, blob_intensity)
+            pattern[rows - 1 - blob_y - blob_size:rows - 1 - blob_y, blob_x:blob_x + blob_size] = self.create_gaussian_blob(blob_size, blob_intensity)
+
+        return np.fft.ifft2(pattern**2).real, True
+
+
+    def create_gaussian_blob(self, size, intensity):
+        x, y = np.meshgrid(np.arange(size), np.arange(size))
+        x_center, y_center = size // 2, size // 2
+        distance = np.sqrt((x - x_center)**2 + (y - y_center)**2)
+        normalized_distance = distance / (size / 2)
+        blob = intensity * np.exp(-5 * normalized_distance**2)
+        return blob
+
+
+    def pattern_centered_aura(self, cols, rows):
         pattern = np.zeros((rows, cols))
 
         center_x, center_y = cols // 2, rows // 2
-        max_distance = np.sqrt(center_x**2 + center_y**2)
+        max_radius = min(center_x, center_y)
+        if max_radius == 0:
+            max_radius = 1
 
         for y in range(rows):
             for x in range(cols):
-                distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-                intensity = 1 - distance / max_distance
-                pattern[y, x] = (255 * intensity)  
+                distance_to_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+                normalized_distance = distance_to_center / max_radius
 
-        return pattern
+                pattern[y, x] = np.exp(-5 * normalized_distance**2)
+
+        return pattern, True
+
+    def pattern_ring_aura(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+
+        center_x, center_y = cols // 2, rows // 2
+        inner_radius = random.randint(20, min(center_x, center_y) - 20)
+        outer_radius = random.randint(inner_radius + 10, min(center_x, center_y) - 10)
+
+        if inner_radius == outer_radius:
+            return pattern, False
+
+        for y in range(rows):
+            for x in range(cols):
+                distance_to_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+
+                if inner_radius <= distance_to_center <= outer_radius:
+                    normalized_distance = (distance_to_center - inner_radius) / (outer_radius - inner_radius)
+                    pattern[y, x] = np.exp(-5 * normalized_distance**2)
+
+        return pattern, True
+
+    def pattern_random_auras(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+        num_auras = random.randint(2, 12)
+
+        for _ in range(num_auras):
+            center_x, center_y = np.random.randint(cols), np.random.randint(rows)
+            max_radius = min(center_x, center_y) // 12 
+
+            if max_radius == 0:
+                max_radius = 1
+
+            intensity = np.random.uniform(0.5, 1)
+
+            for y in range(rows):
+                for x in range(cols):
+                    distance_to_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+                    normalized_distance = distance_to_center / max_radius
+                    pattern[y, x] += intensity * np.exp(-5 * normalized_distance**2)
+    
+        pattern = pattern / np.max(pattern)
+
+        return pattern, True
+
+
+    def pattern_symmetric_grid(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+
+        value_x = np.random.uniform(1, 50)
+        value_y = value_x 
+
+        for y in range(rows):
+            for x in range(cols):
+                value = 128 + 127 * np.sin(2 * np.pi * value_x * x / cols) * np.sin(2 * np.pi * value_y * y / rows)
+                pattern[y, x] = value
+
+        return pattern, True
+
+    def pattern_ovals(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+
+        num_ovals = random.randint(2, 20)
+
+        for _ in range(num_ovals):
+            oval_intensity = random.randint(50, 200)
+            oval_major_axis = random.randint(10, min(cols, rows) // 4)
+            oval_minor_axis = random.randint(5, oval_major_axis - 1)
+            center_x = random.randint(oval_major_axis, cols - oval_major_axis)
+            center_y = random.randint(oval_major_axis, rows - oval_major_axis)
+
+            y, x = np.ogrid[:rows, :cols]
+            mask = ((x - center_x) / oval_major_axis)**2 + ((y - center_y) / oval_minor_axis)**2 <= 1
+            pattern[mask] = oval_intensity
+
+        return pattern, True
+
+    def pattern_circles(self, cols, rows):
+        pattern = np.zeros((rows, cols))
+
+        num_circles = random.randint(2, 20)
+
+        for _ in range(num_circles):
+            circle_intensity = random.randint(50, 200)
+            circle_radius = random.randint(10, min(cols, rows) // 4)
+            center_x = random.randint(circle_radius, cols - circle_radius)
+            center_y = random.randint(circle_radius, rows - circle_radius)
+
+            y, x = np.ogrid[:rows, :cols]
+            mask = (x - center_x)**2 + (y - center_y)**2 <= circle_radius**2
+            pattern[mask] = circle_intensity
+
+        return pattern, True
+
+    def pattern_variable_intensity(self, cols, rows, towards_center=True):
+        pattern = np.zeros((rows, cols))
+
+        max_intensity = random.randint(100, 200)
+        aura_width = random.uniform(0.1, 0.5)
+
+        for y in range(rows):
+            for x in range(cols):
+                distance_to_center = np.sqrt((x - cols // 2)**2 + (y - rows // 2)**2)
+                normalized_distance = distance_to_center / max(cols // 2, rows // 2)
+
+                intensity = max_intensity * np.exp(-0.5 * ((normalized_distance / aura_width)**2))
+
+                if towards_center:
+                    intensity = max_intensity - intensity
+
+                pattern[y, x] = intensity
+
+        return pattern, True
+
 
     def pattern_stripes(self, cols, rows):
-        stripe_width = np.random.randint(5, 40)
-
         pattern = np.zeros((rows, cols))
-        for i in range(0, rows, stripe_width):
-            pattern[i:i+stripe_width, :] = 255  
 
-        return pattern
+        stripe_direction = random.choice(['horizontal', 'vertical', 'both'])
 
-    def pattern_checkerboard(self, cols, rows):
-        square_size = np.random.randint(19, 20)
+        if stripe_direction == 'both':
+            vertical_stripes = self.pattern_stripes_single_direction(cols, rows, 'vertical')
+            horizontal_stripes = self.pattern_stripes_single_direction(cols, rows, 'horizontal')
+            pattern = np.maximum(vertical_stripes, horizontal_stripes)
+        else:
+            pattern = self.pattern_stripes_single_direction(cols, rows, stripe_direction)
 
+        return pattern, True
+
+    def pattern_stripes_single_direction(self, cols, rows, direction):
         pattern = np.zeros((rows, cols))
-        for i in range(0, rows, square_size):
-            for j in range(0, cols, square_size):
-                if (i // square_size + j // square_size) % 2 == 0:
-                    pattern[i:i+square_size, j:j+square_size] = 255  
 
-        return pattern
+        num_stripes = random.randint(5, 20)
+        stripe_width = random.randint(10, 30)
+        stripe_distance = random.randint(30, 60)
+        intensity = random.randint(100, 255)
+        if direction == 'horizontal':
+            for i in range(num_stripes):
+                start_y = random.randint(0, rows - 1)
+                pattern[start_y:start_y + stripe_width, :] = intensity
+                start_y += stripe_distance
+        elif direction == 'vertical':
+            for i in range(num_stripes):
+                start_x = random.randint(0, cols - 1)
+                pattern[:, start_x:start_x + stripe_width] = intensity
+                start_x += stripe_distance
 
-    def pattern_random_dots(self, cols, rows):
-        num_dots = np.random.randint(10, 100)
-
-        pattern = np.zeros((rows, cols))
-        for _ in range(num_dots):
-            x = np.random.randint(cols)
-            y = np.random.randint(rows)
-            pattern[y, x] = 255  
-
-        return pattern
-
-
-
-    def pattern_random_circles(self, cols, rows):
-        pattern = np.zeros((rows, cols))
-        num_circles = np.random.randint(5, 20)
-
-        for _ in range(num_circles):
-            x, y = np.random.randint(cols), np.random.randint(rows)
-            radius = np.random.randint(5, 30)
-
-            # Disegna manualmente il cerchio nel dominio complesso
-            y_vals, x_vals = np.ogrid[-y:rows - y, -x:cols - x]
-            mask = x_vals**2 + y_vals**2 <= radius**2
-            circle_points = np.zeros_like(pattern)
-            circle_points[mask] = 255
-
-            # Aggiorna il pattern complesso con i valori del cerchio
-            pattern += circle_points
-
-        return pattern
-
-
-    def pattern_random_diagonal_lines(self, cols, rows):
-        num_lines = np.random.randint(5, 20)
-
-        pattern = np.zeros((rows, cols))
-        for _ in range(num_lines):
-            thickness = np.random.randint(1, 5)
-            color = 255 if np.random.rand() > 0.5 else 0  
-            x1 = 0
-            y1 = np.random.randint(rows)
-            x2 = cols
-            y2 = np.random.randint(rows)
-            
-            # Draw the line manually in the complex domain, considering image boundaries
-            y_values = np.linspace(y1, y2, rows)
-            x_values = np.linspace(x1, x2, cols)
-            for i in range(min(len(x_values), len(y_values))):
-                y_idx = int(np.clip(y_values[i], 0, rows - 1))
-                x_idx = int(np.clip(x_values[i], 0, cols - 1))
-                pattern[y_idx, x_idx] = color
-
-        return pattern
-
-
-    def pattern_random_ellipses(self, cols, rows):
-        num_ellipses = np.random.randint(5, 20)
-
-        pattern = np.zeros((rows, cols))
-        for _ in range(num_ellipses):
-            center_x = np.random.randint(cols)
-            center_y = np.random.randint(rows)
-            major_axis = np.random.randint(10, 50)
-            minor_axis = np.random.randint(5, 30)
-            angle = np.random.randint(0, 180)
-
-            # Disegna manualmente l'ellisse nel dominio complesso
-            t = np.linspace(15, 2 * np.pi, 100)
-            x = center_x + major_axis * np.cos(np.radians(angle)) * np.cos(t) - minor_axis * np.sin(np.radians(angle)) * np.sin(t)
-            y = center_y + major_axis * np.sin(np.radians(angle)) * np.cos(t) + minor_axis * np.cos(np.radians(angle)) * np.sin(t)
-
-            # Imposta i valori dell'ellisse nel pattern complesso
-            for i in range(len(x)):
-                x_coord = int(round(x[i]))
-                y_coord = int(round(y[i]))
-                if 0 <= x_coord < cols and 0 <= y_coord < rows:
-                    pattern[y_coord, x_coord] = 255  
-
-        return pattern
-
-
-
-    def pattern_concentric_circles(self, cols, rows):
-        num_circles = np.random.randint(5, 20)
-
-        pattern = np.zeros((rows, cols))
-        center_x = cols // 2
-        center_y = rows // 2
-        max_radius = min(center_x, center_y) - 10
-
-        for _ in range(num_circles):
-            radius = np.random.randint(15, max_radius)
-
-            # Disegna manualmente il cerchio nel dominio complesso
-            t = np.linspace(15, 2 * np.pi, 100)
-            x = center_x + radius * np.cos(t)
-            y = center_y + radius * np.sin(t)
-
-            # Imposta i valori del cerchio nel pattern complesso
-            for i in range(len(x)):
-                x_coord = int(round(x[i]))
-                y_coord = int(round(y[i]))
-                if 0 <= x_coord < cols and 0 <= y_coord < rows:
-                    pattern[y_coord, x_coord] = 255  
-
-        return pattern
-
-    def pattern_high_frequency_noise(self, cols, rows):
-        noise_std = np.random.uniform(0.005, 0.02)
-
-        noise = np.random.normal(10, noise_std, (rows, cols))
-        return noise
-
-    def pattern_structured_noise(self, cols, rows):
-        intensity = np.random.uniform(0.1, 0.5)
-
-        pattern = np.random.rand(rows, cols) * intensity  
-        return pattern
-
-    def pattern_gradient_patterns(self, cols, rows):
-        intensity = np.random.uniform(0.1, 0.5)
-
-        x, y = np.meshgrid(np.arange(cols), np.arange(rows))
-        gradient_x = x.astype(np.float32) / (cols - 1)
-        gradient_y = y.astype(np.float32) / (rows - 1)
-        pattern = (gradient_x + gradient_y) * intensity  
         return pattern

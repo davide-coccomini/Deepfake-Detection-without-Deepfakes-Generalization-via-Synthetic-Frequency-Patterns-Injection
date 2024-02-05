@@ -62,6 +62,8 @@ if __name__ == "__main__":
                         help='Number of data loader workers.')
     parser.add_argument('--resume', default='', type=str, metavar='PATH',
                         help='Path to latest checkpoint (default: none).')
+    parser.add_argument('--restore_epoch', default=False, action="store_true",
+                        help='Start from the epoch of checkpoint.')
     parser.add_argument('--training_csv', default='../data/sd_diffused_coco/train.csv', type=str, metavar='PATH',
                         help='Path to the training csv file.')
     parser.add_argument('--validation_csv', default="../data/sd_diffused_coco/val.csv", type=str, metavar='PATH',
@@ -76,6 +78,8 @@ if __name__ == "__main__":
                         help='Pre-load the images in memory (True) or load from path in the dataloader.')
     parser.add_argument('--use_fake_patterns', default=False, action="store_true",
                         help='Apply structured patterns to fake images.')
+    parser.add_argument('--only_pristines', default=False, action="store_true",
+                        help='Ignore fake images')
     parser.add_argument('--pollute_pristines', default=False, action="store_true",
                         help='Apply structured patterns to pristine images.')
     parser.add_argument('--config', type=str, 
@@ -86,6 +90,8 @@ if __name__ == "__main__":
                         help='ID of GPUs to be visible in multi-gpu.')
     parser.add_argument('--model', default=0, type=int,
                         help='Model (0: Resnet50; 1: Swin).')
+    parser.add_argument('--required_pattern', default=0, type=int,
+                        help='0: All Pattern; 1: Geometric; 2: Grids; 3: X; 4: Y; 5: GLIDE')
     parser.add_argument('--patience', type=int, default=10, 
                         help="How many epochs wait before stopping for validation loss not improving.")
     parser.add_argument('--random_state', default=42, type=int,
@@ -110,16 +116,20 @@ if __name__ == "__main__":
         model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
         model.fc = torch.nn.Linear(2048, config['model']['num-classes'])
     elif opt.model == 1:
-        model = timm.create_model('swin_base_patch4_window7_224.ms_in22k_ft_in1k', in_chans = 3, pretrained=True)
+        model = timm.create_model('swin_base_patch4_window7_224.ms_in22k_ft_in1k', in_chans = 3, pretrained=True, drop_rate=config['model']['dropout'])
         model.head.fc = torch.nn.Linear(1024, config['model']['num-classes'])
         for index, (name, param) in enumerate(model.named_parameters()):
             param.requires_grad = True
 
+    if opt.gpu_id == -1:
+        model = torch.nn.DataParallel(model)
     starting_epoch = 0
     if os.path.exists(opt.resume):
         model.load_state_dict(torch.load(opt.resume, map_location='cpu'))
-        starting_epoch = int(opt.resume.split("checkpoint")[1]) + 1 # The checkpoint's file name format should be "checkpoint_EPOCH"
-        print("Weights loaded.")
+        if opt.restore_epoch:
+            print(opt.resume.split("checkpoint"))
+            starting_epoch = int(opt.resume.split("checkpoint")[1]) + 1 # The checkpoint's file name format should be "checkpoint_EPOCH"
+    print("Weights loaded.")
 
 
     if opt.gpu_id == -1:
@@ -128,14 +138,14 @@ if __name__ == "__main__":
         device = opt.gpu_id
 
 
-    if opt.gpu_id == -1:
-        model = torch.nn.DataParallel(model)
 
 
     model = model.to(device)
 
     train_df = pd.read_csv(opt.training_csv) 
     train_df = train_df.sample(frac = 1)
+    if opt.only_pristines:
+        train_df = train_df[train_df['label'] == 0]
 
     if opt.pre_load_images:
         train_paths = train_df["path"].tolist()
@@ -147,10 +157,10 @@ if __name__ == "__main__":
         print("Reading training images...")
         with Pool(processes=opt.workers) as p:
             with tqdm(total=len(train_paths)) as pbar:
-                for v in p.imap_unordered(partial(read_images, dataset=train_dataset, size=config['model']['image-size']),train_paths):
+                for v in p.imap_unordered(partial(read_images, dataset=train_dataset, size=config['model']['image-size']), train_paths):
                     pbar.update()
         train_labels = [row[1] for row in train_dataset]
-        train_dataset = DeepFakesDataset([row[0] for row in train_dataset], train_labels, config['model']['image-size'], pre_load_images = opt.pre_load_images, use_fake_patterns=opt.use_fake_patterns, pollute_pristines = opt.pollute_pristines)
+        train_dataset = DeepFakesDataset([row[0] for row in train_dataset], train_labels, config['model']['image-size'],  only_pristines = opt.only_pristines, pre_load_images = opt.pre_load_images, use_fake_patterns=opt.use_fake_patterns, required_pattern=opt.required_pattern, pollute_pristines = opt.pollute_pristines)
     else:
         train_paths = train_df["path"].tolist()
         train_paths = [os.path.join(opt.data_path, path) for path in train_paths]
@@ -158,7 +168,7 @@ if __name__ == "__main__":
         if opt.max_images > 0:
             train_paths = train_paths[:opt.max_images]
             train_labels = train_labels[:opt.max_images]
-        train_dataset = DeepFakesDataset(train_paths, train_labels, config['model']['image-size'], pre_load_images = opt.pre_load_images, use_fake_patterns=opt.use_fake_patterns, pollute_pristines = opt.pollute_pristines)
+        train_dataset = DeepFakesDataset(train_paths, train_labels, config['model']['image-size'], only_pristines = opt.only_pristines, pre_load_images = opt.pre_load_images, use_fake_patterns=opt.use_fake_patterns, required_pattern=opt.required_pattern, pollute_pristines = opt.pollute_pristines)
 
     dl = torch.utils.data.DataLoader(train_dataset, batch_size=config['training']['bs'], shuffle=False, sampler=None,
                                     batch_sampler=None, num_workers=opt.workers, collate_fn=None,
@@ -209,7 +219,10 @@ if __name__ == "__main__":
     print("__TRAINING STATS__")
     train_counters = collections.Counter(train_labels)
     print(train_counters)
-    class_weights = train_counters[0] / train_counters[1]
+    if opt.only_pristines:
+        class_weights = 1
+    else:
+        class_weights = train_counters[0] / train_counters[1]
     print("Weights", class_weights)
 
     print("__VALIDATION STATS__")
@@ -255,7 +268,6 @@ if __name__ == "__main__":
     for t in range(starting_epoch, opt.num_epochs + 1):
         if not_improved_loss == opt.patience:
             break
-
         counter = 0
         total_loss = 0
         total_val_loss = 0
@@ -295,7 +307,6 @@ if __name__ == "__main__":
             if index%5 == 0:
                 print("\n[" + str(datetime.now().strftime('%H:%M:%S.%f')) + "]", "(Loss: ", total_loss/counter, "Accuracy: ", train_correct/(counter*config['training']['bs']) ,"Train 0s: ", negative, "Train 1s:", positive)
 
-            
         val_counter = 0
         val_correct = 0
         val_positive = 0
@@ -356,10 +367,13 @@ if __name__ == "__main__":
             if opt.pollute_pristines:
                 model_name += "Polluted"
 
+            if opt.only_pristines:
+                model_name += "OnlyPristines"
+
 
             torch.save(model.state_dict(), os.path.join(opt.models_output_path, model_name + "_checkpoint" + str(t)))
         
         
         previous_loss = total_val_loss
 
-    bar.finish()
+    bar.close()

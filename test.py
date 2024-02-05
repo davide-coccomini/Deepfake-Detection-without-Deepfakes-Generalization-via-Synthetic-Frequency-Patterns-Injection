@@ -1,6 +1,5 @@
 
 
-from datasets import load_dataset
 import torch
 from deepfakes_dataset import DeepFakesDataset
 from torch.utils.data import DataLoader, TensorDataset, Dataset
@@ -17,7 +16,6 @@ from multiprocessing import Manager
 from multiprocessing.pool import Pool
 from functools import partial
 import numpy as np
-from cross_efficient_vit import CrossEfficientViT
 import math
 import random
 import os
@@ -30,17 +28,31 @@ import collections
 from sklearn.metrics import f1_score, roc_curve, auc
 import timm
 
+
+
+def read_images(path, excluded_paths):
+    try:
+        image = cv2.imread(path)
+        if image is None:
+            excluded_paths.append(path)
+    except:
+        print("Image reading failed on", path)
+        excluded_paths.append(path)
+    
+
 if __name__ == "__main__":
     
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--workers', default=80, type=int,
                         help='Number of data loader workers.')
-    parser.add_argument('--test_folder', default='datasets/test_set', type=str, metavar='PATH',
+    parser.add_argument('--test_folder', default='../data/test', type=str, metavar='PATH',
                         help='Path to the test images.')
-    parser.add_argument('--correct_labels_csv', default='', type=str, metavar='PATH',
+    parser.add_argument('--data_folder', default='../data', type=str, metavar='PATH',
+                        help='Path to the test images.')
+    parser.add_argument('--correct_labels_csv', default='../data/test/test.csv', type=str, metavar='PATH',
                         help='Path to the labels csv file if available.')
-    parser.add_argument('--output_path', default="predictions.json", type=str, metavar='PATH',
+    parser.add_argument('--output_path', default="outputs/test/swin/no_pattern/predictions.json", type=str, metavar='PATH',
                         help='Path to the output json file.')
     parser.add_argument('--max_images', type=int, default=-1, 
                         help="Maximum number of images to use for training (default: all).")
@@ -77,6 +89,9 @@ if __name__ == "__main__":
         device = opt.gpu_id
 
     
+    if opt.gpu_id == -1:
+        model = torch.nn.DataParallel(model)
+
     
     if opt.model == 0:
         model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
@@ -87,6 +102,7 @@ if __name__ == "__main__":
     if os.path.exists(opt.model_weights):
         
         state_dict = torch.load(opt.model_weights, map_location='cpu')
+        
         new_state_dict = {}
         for key, value in state_dict.items():
             if key.startswith('module.'):
@@ -96,6 +112,7 @@ if __name__ == "__main__":
                 new_state_dict[key] = value
 
         model.load_state_dict(new_state_dict)
+        print("Loaded weights in", opt.model_weights)
     else:
         raise Exception("No checkpoint loaded for the model.")    
 
@@ -108,15 +125,13 @@ if __name__ == "__main__":
         device = opt.gpu_id
 
 
-    if opt.gpu_id == -1:
-        model = torch.nn.DataParallel(model)
-
     model = model.to(device)
 
     if opt.correct_labels_csv != "":
         test_df = pd.read_csv(opt.correct_labels_csv)
 
         test_paths = test_df["path"].tolist()
+        test_paths = [os.path.join(opt.test_folder, path) if "sd" not in path else os.path.join(opt.data_folder, path) for path in test_paths]
         test_labels = test_df['label'].tolist()
         test_methods = test_df["method"].tolist()
     else:
@@ -134,21 +149,45 @@ if __name__ == "__main__":
         test_methods = test_methods[:opt.max_images]
     test_samples = len(test_paths)
     correct_test_labels = test_labels
-    
     test_counters = collections.Counter(test_labels)
+    print(collections.Counter(test_methods))
+    '''
+    mgr = Manager()
+    excluded_paths = mgr.list()
+    
+    print("Reading test images...")
+    with Pool(processes=opt.workers) as p:
+        with tqdm(total=len(test_paths)) as pbar:
+            for v in p.imap_unordered(partial(read_images, excluded_paths=excluded_paths), test_paths):
+                pbar.update()
+    
+    tmp_paths = []
+    tmp_labels = []
+    tmp_methods = []
 
+    for i in range(len(test_paths)):
+        if test_paths[i] not in excluded_paths:
+            tmp_paths.append(test_paths[i])
+            tmp_labels.append(test_labels[i])
+            tmp_methods.append(test_methods[i])
+
+    print("Ignored ", len(test_paths) - len(tmp_paths), "images due to reading error.")
+    test_paths = tmp_paths
+    test_labels = tmp_labels
+    test_methods = tmp_methods
+    '''
+    
     test_dataset = DeepFakesDataset(test_paths, test_labels, config['model']['image-size'], methods = test_methods,  mode='test')
-
 
     test_dl = torch.utils.data.DataLoader(test_dataset, batch_size=config['test']['bs'], shuffle=False, sampler=None,
                                 batch_sampler=None, num_workers=opt.workers, collate_fn=None,
                                 pin_memory=False, drop_last=False, timeout=0,
-                                worker_init_fn=None, prefetch_factor=2,
+                                worker_init_fn=None, prefetch_factor=1,
                                 persistent_workers=False)
     if opt.error_analysis:
         errors = {}
 
-    bar = ChargingBar('PREDICT', max=(len(test_dl)))
+    bar = tqdm(total=(len(test_dl)), desc='PREDICT')
     preds = []
     names = []
     test_counter = 0
@@ -157,9 +196,10 @@ if __name__ == "__main__":
     test_negative = 0
     correct_test_labels = []
     method_counters = {}
-    for index, (images, images_dct, image_path, labels, methods) in enumerate(test_dl):
+    for index, (images, image_path, labels, methods) in enumerate(test_dl):
         with torch.no_grad():
-
+            if index % 500 == 0:
+                print(methods[0])
             labels = labels.unsqueeze(1)
             images = np.transpose(images, (0, 3, 1, 2))
             images = images.to(device)
@@ -170,8 +210,7 @@ if __name__ == "__main__":
             correct_test_labels.extend(labels)
             names.append(os.path.basename(image_path[0]))
             
-            corrects, positive_class, negative_class = check_correct(y_pred, labels, opt.ensemble, opt.threshold)  
-
+            corrects, positive_class, negative_class = check_correct(y_pred, labels, opt.threshold)  
             if opt.error_analysis:
                 method = methods[0]
                 if corrects == 0:
@@ -184,42 +223,38 @@ if __name__ == "__main__":
                 else:
                     method_counters[method] = 1
 
+
             test_correct += corrects
             test_positive += positive_class
             test_counter += 1
             test_negative += negative_class
 
-            bar.next()
+            bar.update(1)
 
     if opt.error_analysis:
-        for method in errors:
-            errors[method] = round(((method_counters[method] - errors[method]) / method_counters[method])*100, 1)
-            
-        print("__ERRORS PER METHOD__")
+        for method in set(test_methods):
+            if method in errors:
+                errors[method] = round(((method_counters[method] - errors[method]) / method_counters[method])*100, 1)
+            else:
+                errors[method] = 100
+
+        print("__ACCURACY PER METHOD__")
         print(errors)
 
     with open(opt.output_path, "w+") as f:
         f.write("{")
         for i in range(len(names)):
-            if opt.ensemble:
-                f.write("\n\"" + names[i] + "\": " + str(custom_round(preds[i], opt.threshold)) + ",")
-            else:
-                f.write("\n\"" + names[i] + "\": " + str(custom_round(preds[i].item(), opt.threshold)) + ",")
+            f.write("\n\"" + names[i] + "\": " + str(custom_round(preds[i].item(), opt.threshold)) + ",")
         f.write("\n}")
     f.close()
     
     test_preds_counter = collections.Counter(preds)
     correct_test_labels = [int(label.item()) for label in correct_test_labels]
     if opt.correct_labels_csv != "":
-        if opt.ensemble:
-            fpr, tpr, th = roc_curve(correct_test_labels, [custom_round(pred, opt.threshold) for pred in preds])
-            auc = auc(fpr, tpr)
-            f1 = f1_score(correct_test_labels,  [custom_round(pred, opt.threshold) for pred in preds])
-        else:
-            fpr, tpr, th = roc_curve(correct_test_labels, [custom_round(pred.item(), opt.threshold) for pred in preds])
-            auc = auc(fpr, tpr)
-            f1 = f1_score(correct_test_labels,  [custom_round(pred.item(), opt.threshold) for pred in preds])
-        bar.finish()
+        fpr, tpr, th = roc_curve(correct_test_labels, [custom_round(pred.item(), opt.threshold) for pred in preds])
+        auc = auc(fpr, tpr)
+        f1 = f1_score(correct_test_labels,  [custom_round(pred.item(), opt.threshold) for pred in preds])
         test_correct /= test_samples
         print("F1 score: " + str(f1) + " test accuracy:" + str(test_correct) + " test_0s:" + str(test_negative) + "/" + str(test_counters[0]) + " test_1s:" + str(test_positive) + "/" + str(test_counters[1]) + " AUC " + str(auc))
     
+    bar.close()

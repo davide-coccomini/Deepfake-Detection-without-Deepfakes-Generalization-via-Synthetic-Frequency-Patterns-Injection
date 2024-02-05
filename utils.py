@@ -5,13 +5,12 @@ import cv2
 import torch
 from statistics import mean
 
-def check_correct(preds, labels, ensemble=False, threshold = 0.5):
+def check_correct(preds, labels, threshold = 0.5):
     labels = labels.cpu()
-    if not ensemble:
-        preds = preds.cpu()
-        preds = [custom_round(torch.sigmoid(pred).detach().numpy(), threshold = threshold) for pred in preds]
-    else:
-        preds = [custom_round(preds, threshold = threshold)]
+
+    preds = preds.cpu()
+    preds = [custom_round(torch.sigmoid(pred).detach().numpy(), threshold = threshold) for pred in preds]
+
     correct = 0
     positive_class = 0
     negative_class = 0
