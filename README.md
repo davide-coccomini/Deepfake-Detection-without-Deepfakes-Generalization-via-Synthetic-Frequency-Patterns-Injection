@@ -3,7 +3,7 @@
 Published on Computer Vision and Image Understanding (CVIU)
 
 <p align="center">
-  <img src="images/patterns_geometric.png" alt="Geometric patterns" width="60%"/>
+  <img src="images/patterns_geometric.png" alt="Geometric patterns" width="100%"/>
 </p>
 
 <table align="center" width="100%">
