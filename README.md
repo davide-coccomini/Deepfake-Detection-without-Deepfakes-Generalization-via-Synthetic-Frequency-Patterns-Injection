@@ -1,6 +1,8 @@
-# Deepfake Detection without Deepfakes: Generalization via Synthetic Frequency Patterns Injection
+#  Synthetic Frequency Patterns Injection for Data-Agnostic Deepfake Detection
 
 Published on Computer Vision and Image Understanding (CVIU)
+[https://doi.org/10.1016/j.cviu.2026.104781](https://doi.org/10.1016/j.cviu.2026.104781)
+
 
 <p align="center">
   <img src="images/patterns_geometric.png" alt="Geometric patterns" width="100%"/>
